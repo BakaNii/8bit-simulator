@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Cpu, Info, Play, Square, SkipForward, AlertTriangle, CheckCircle2, Terminal, HelpCircle, X, Moon, Sun } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Plus, Trash2, Cpu, Info, Play, Square, SkipForward, AlertTriangle, CheckCircle2, Terminal, HelpCircle, X, Moon, Sun, Settings2, Clock } from 'lucide-react';
 
 const OPCODES = {
   NOP: { code: 0, desc: 'No operation' },
@@ -23,140 +23,210 @@ const INITIAL_PROGRAM = [
   { id: '6', mnemonic: 'DATA', operand: 28 },
 ];
 
-// 16-bit Simulated control signals mapping to the schematic EEPROMs
+// Returns the 16-bit Control Word for a given instruction, T-State, and Carry Flag
 // Format: HLT | MI | RI | RO | IO | II | AI | AO || EO | SU | BI | OI | CE | CO | J | FI
-const CTRL_WORDS = {
-  NOP:  0x0000, 
-  LDA:  0x1200, // RO, AI
-  ADD:  0x12A1, // RO, AI, EO, BI, FI
-  SUB:  0x12E1, // RO, AI, EO, SU, BI, FI
-  STA:  0x2100, // RI, AO
-  OUT:  0x0110, // AO, OI
-  JMP:  0x0802, // IO, J
-  LDI:  0x0A00, // IO, AI
-  JC:   0x0802, // IO, J
-  HLT:  0x8000, // HLT
-  DATA: 0x0000,
+const getControlWord = (ir, tState, cf) => {
+  if (tState === 0) return 0x4004; // T0: MI | CO (Fetch)
+  if (tState === 1) return 0x1408; // T1: RO | II | CE (Fetch)
+  
+  const opcode = ir >> 4;
+  const t = tState - 2;
+  
+  switch (opcode) {
+    case 0: return 0; // NOP
+    case 1: // LDA
+       if (t===0) return 0x4800; // IO | MI
+       if (t===1) return 0x1200; // RO | AI
+       return 0;
+    case 2: // ADD
+       if (t===0) return 0x4800; // IO | MI
+       if (t===1) return 0x1020; // RO | BI
+       if (t===2) return 0x0281; // EO | AI | FI
+       return 0;
+    case 3: // SUB
+       if (t===0) return 0x4800; // IO | MI
+       if (t===1) return 0x1020; // RO | BI
+       if (t===2) return 0x02C1; // EO | AI | SU | FI
+       return 0;
+    case 4: // STA
+       if (t===0) return 0x4800; // IO | MI
+       if (t===1) return 0x2100; // AO | RI
+       return 0;
+    case 5: // OUT
+       if (t===0) return 0x0110; // AO | OI
+       return 0;
+    case 6: // JMP
+       if (t===0) return 0x0802; // IO | J
+       return 0;
+    case 7: // LDI
+       if (t===0) return 0x0A00; // IO | AI
+       return 0;
+    case 8: // JC
+       if (t===0) return cf ? 0x0802 : 0; // IO | J (Only if Carry Flag is true)
+       return 0;
+    case 15: // HLT
+       return 0x8000;
+    default: return 0;
+  }
 };
 
 const toBin = (num, bits) => {
   const val = parseInt(num) || 0;
-  // Handle negative numbers or out of bounds simply by masking
   const masked = val & ((1 << bits) - 1);
   return masked.toString(2).padStart(bits, '0');
 };
 
 const SevenSegDigit = ({ val }) => {
   const patterns = {
-    0: '1111110', 1: '0110000', 2: '1101101', 3: '1111001',
-    4: '0110011', 5: '1011011', 6: '1011111', 7: '1110000',
-    8: '1111111', 9: '1111011', off: '0000000'
+    '0': '1111110', '1': '0110000', '2': '1101101', '3': '1111001',
+    '4': '0110011', '5': '1011011', '6': '1011111', '7': '1110000',
+    '8': '1111111', '9': '1111011', 
+    'A': '1110111', 'B': '0011111', 'C': '1001110', 'D': '0111101', 
+    'E': '1001111', 'F': '1000111', '-': '0000001', 'off': '0000000'
   };
-  const p = patterns[val !== undefined && val !== null ? val : 'off'] || patterns.off;
+  const p = patterns[val] || patterns.off;
   const onClass = "stroke-red-500 [filter:drop-shadow(0_0_2px_#ef4444)]";
   const offClass = "stroke-red-950/20";
   
   return (
-    <svg viewBox="0 0 20 34" className="w-5 h-8" strokeWidth="3" strokeLinecap="round">
-      {/* a */} <line x1="5" y1="3" x2="15" y2="3" className={p[0]==='1' ? onClass : offClass} />
-      {/* b */} <line x1="17" y1="5" x2="17" y2="15" className={p[1]==='1' ? onClass : offClass} />
-      {/* c */} <line x1="17" y1="19" x2="17" y2="29" className={p[2]==='1' ? onClass : offClass} />
-      {/* d */} <line x1="5" y1="31" x2="15" y2="31" className={p[3]==='1' ? onClass : offClass} />
-      {/* e */} <line x1="3" y1="19" x2="3" y2="29" className={p[4]==='1' ? onClass : offClass} />
-      {/* f */} <line x1="3" y1="5" x2="3" y2="15" className={p[5]==='1' ? onClass : offClass} />
-      {/* g */} <line x1="5" y1="17" x2="15" y2="17" className={p[6]==='1' ? onClass : offClass} />
+    <svg viewBox="0 0 20 34" className="w-4 h-6 sm:w-5 sm:h-8" strokeWidth="3" strokeLinecap="round">
+      <line x1="5" y1="3" x2="15" y2="3" className={p[0]==='1' ? onClass : offClass} />
+      <line x1="17" y1="5" x2="17" y2="15" className={p[1]==='1' ? onClass : offClass} />
+      <line x1="17" y1="19" x2="17" y2="29" className={p[2]==='1' ? onClass : offClass} />
+      <line x1="5" y1="31" x2="15" y2="31" className={p[3]==='1' ? onClass : offClass} />
+      <line x1="3" y1="19" x2="3" y2="29" className={p[4]==='1' ? onClass : offClass} />
+      <line x1="3" y1="5" x2="3" y2="15" className={p[5]==='1' ? onClass : offClass} />
+      <line x1="5" y1="17" x2="15" y2="17" className={p[6]==='1' ? onClass : offClass} />
     </svg>
   );
 };
 
-const SevenSegmentDisplay = ({ value }) => {
-  const strVal = value.toString().padStart(3, '0');
+const SevenSegmentDisplay = ({ value, mode, advanced }) => {
+  let chars = [];
+  
+  if (!advanced || mode === 'uint') {
+    chars = value.toString().padStart(3, '0').split('');
+  } else if (mode === 'int') {
+    const signedVal = value > 127 ? value - 256 : value;
+    const str = signedVal.toString();
+    chars = str.split('');
+    while (chars.length < 4) chars.unshift('off'); 
+  } else if (mode === 'hex') {
+    chars = value.toString(16).toUpperCase().padStart(2, '0').split('');
+    chars.unshift('off');
+  }
+
   return (
-    <div className="flex gap-1.5 bg-black p-2 rounded-md border-2 border-slate-800 shadow-[inset_0_0_15px_rgba(0,0,0,1)]">
-      <SevenSegDigit val={strVal[0]} />
-      <SevenSegDigit val={strVal[1]} />
-      <SevenSegDigit val={strVal[2]} />
+    <div className="flex gap-1 sm:gap-1.5 bg-black p-1.5 sm:p-2 rounded-md border-2 border-slate-800 shadow-[inset_0_0_15px_rgba(0,0,0,1)]">
+      {chars.map((c, i) => <SevenSegDigit key={i} val={c} />)}
     </div>
   );
 };
 
 const LED = ({ on, color = 'red', label = '', setHoverInfo }) => {
   const colors = {
-    red: on ? 'bg-red-500 shadow-[0_0_10px_#ef4444]' : 'bg-red-950',
-    green: on ? 'bg-emerald-400 shadow-[0_0_10px_#34d399]' : 'bg-emerald-950',
-    blue: on ? 'bg-blue-400 shadow-[0_0_10px_#60a5fa]' : 'bg-blue-950',
-    yellow: on ? 'bg-amber-400 shadow-[0_0_10px_#fbbf24]' : 'bg-amber-950',
+    red: on ? 'bg-red-500 shadow-[0_0_8px_#ef4444]' : 'bg-red-950',
+    green: on ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-emerald-950',
+    blue: on ? 'bg-blue-400 shadow-[0_0_8px_#60a5fa]' : 'bg-blue-950',
+    yellow: on ? 'bg-amber-400 shadow-[0_0_8px_#fbbf24]' : 'bg-amber-950',
   };
   return (
     <div 
-      className={`w-3 h-3 rounded-full border border-black/80 ${colors[color]} transition-all duration-150 cursor-crosshair`}
+      className={`w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full border border-black/80 ${colors[color]} transition-colors duration-75 cursor-crosshair`}
       onMouseEnter={() => setHoverInfo && setHoverInfo(label)}
       onMouseLeave={() => setHoverInfo && setHoverInfo(null)}
     />
   );
 };
 
-const BreadboardChip = ({ title, value, bits = 8, color = 'red', manualBits, bitLabels, setHoverInfo }) => {
+const BreadboardChip = ({ title, value, bits = 8, color = 'red', manualBits, bitLabels, setHoverInfo, children }) => {
   const binStr = manualBits ? manualBits : toBin(value, bits);
   const pinCount = Math.max(4, Math.ceil(bits / 2));
   return (
-    <div className="bg-gradient-to-b from-slate-700 to-slate-900 border-b-4 border-slate-950 ring-1 ring-white/10 rounded-md py-2 px-3 flex flex-col items-center gap-2 shadow-2xl relative w-max mx-auto z-10 transition-transform hover:-translate-y-0.5 duration-300">
+    <div className="bg-gradient-to-b from-slate-700 to-slate-900 border-b-4 border-slate-950 ring-1 ring-white/10 rounded-md py-2 px-2 sm:px-3 flex flex-col items-center gap-2 shadow-2xl relative w-max mx-auto z-10 transition-transform hover:-translate-y-0.5 duration-300">
       <div className="absolute -top-1 left-2 right-2 flex justify-between px-1">
-        {Array.from({ length: pinCount }).map((_, i) => <div key={`t-${i}`} className="w-1.5 h-1.5 bg-gradient-to-b from-slate-300 to-slate-500 rounded-sm shadow-sm" />)}
+        {Array.from({ length: pinCount }).map((_, i) => <div key={`t-${i}`} className="w-1 h-1.5 sm:w-1.5 sm:h-1.5 bg-gradient-to-b from-slate-300 to-slate-500 rounded-sm shadow-sm" />)}
       </div>
-      <div className="text-[9px] font-bold text-slate-300 uppercase tracking-widest text-center leading-tight whitespace-nowrap drop-shadow-md">{title}</div>
-      <div className="flex gap-1.5 bg-black/20 p-1.5 rounded-full shadow-inner border border-white/5">
-        {binStr.split('').map((bit, i) => {
-          const bitIndex = bits - 1 - i;
-          const defaultLabel = `${title} - Bit ${bitIndex}: ${bit}`;
-          const label = bitLabels ? `${bitLabels[i]}: ${bit}` : defaultLabel;
-          return <LED key={i} on={bit === '1'} color={color} label={label} setHoverInfo={setHoverInfo} />;
-        })}
-      </div>
+      <div className="text-[8px] sm:text-[9px] font-bold text-slate-300 uppercase tracking-widest text-center leading-tight whitespace-nowrap drop-shadow-md">{title}</div>
+      
+      {children ? children : (
+        <div className="flex gap-1 sm:gap-1.5 bg-black/20 p-1 sm:p-1.5 rounded-full shadow-inner border border-white/5">
+          {binStr.split('').map((bit, i) => {
+            const bitIndex = bits - 1 - i;
+            const defaultLabel = `${title} - Bit ${bitIndex}: ${bit}`;
+            const label = bitLabels ? `${bitLabels[i]}: ${bit}` : defaultLabel;
+            return <LED key={i} on={bit === '1'} color={color} label={label} setHoverInfo={setHoverInfo} />;
+          })}
+        </div>
+      )}
+      
       <div className="absolute -bottom-1 left-2 right-2 flex justify-between px-1">
-        {Array.from({ length: pinCount }).map((_, i) => <div key={`b-${i}`} className="w-1.5 h-1.5 bg-gradient-to-t from-slate-300 to-slate-500 rounded-sm shadow-sm" />)}
+        {Array.from({ length: pinCount }).map((_, i) => <div key={`b-${i}`} className="w-1 h-1.5 sm:w-1.5 sm:h-1.5 bg-gradient-to-t from-slate-300 to-slate-500 rounded-sm shadow-sm" />)}
       </div>
     </div>
   );
 };
 
-const OutRegChip = ({ value, setHoverInfo }) => {
-  const binStr = toBin(value, 8);
-  const pinCount = 4;
-  return (
-    <div className="bg-gradient-to-b from-slate-700 to-slate-900 border-b-4 border-slate-950 ring-1 ring-white/10 rounded-md py-2 px-3 flex flex-col items-center gap-3 shadow-2xl relative w-max mx-auto z-10 transition-transform hover:-translate-y-0.5 duration-300">
-      <div className="absolute -top-1 left-2 right-2 flex justify-between px-1">
-        {Array.from({ length: pinCount }).map((_, i) => <div key={`t-${i}`} className="w-1.5 h-1.5 bg-gradient-to-b from-slate-300 to-slate-500 rounded-sm shadow-sm" />)}
+// Reusable Controls Bar so we can place it in multiple intuitive locations
+const SimulatorControls = ({ isPlaying, setIsPlaying, sim, stepSim, resetSim, clockSpeed, setClockSpeed }) => (
+  <div className="flex items-center gap-2 sm:gap-3 bg-slate-100/50 dark:bg-slate-800/50 p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm backdrop-blur-md w-full sm:w-auto justify-center sm:justify-start">
+    <button 
+      onClick={() => setIsPlaying(!isPlaying)}
+      disabled={sim.halted}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all shadow-sm text-xs ${isPlaying ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-500/20 dark:text-amber-400 dark:hover:bg-amber-500/30' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-500/20 dark:text-emerald-400 dark:hover:bg-emerald-500/30'} disabled:opacity-50 disabled:cursor-not-allowed`}
+    >
+      {isPlaying ? <Square size={14} className="fill-amber-700 dark:fill-amber-400"/> : <Play size={14} className="fill-emerald-700 dark:fill-emerald-400"/>}
+      {isPlaying ? 'PAUSE' : 'AUTO'}
+    </button>
+    
+    <div className="flex flex-col px-2 border-l border-r border-slate-300 dark:border-slate-600 hidden sm:flex">
+      <div className="flex justify-between items-center w-20">
+        <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Speed</span>
+        <span className="text-[9px] font-bold text-blue-600 dark:text-blue-400">{clockSpeed}Hz</span>
       </div>
-      <div className="text-[9px] font-bold text-slate-300 uppercase tracking-widest text-center leading-tight whitespace-nowrap drop-shadow-md">OUT REG / DISPLAY</div>
-      
-      <SevenSegmentDisplay value={value} />
-      
-      <div className="flex gap-1.5 mt-1 bg-black/20 p-1.5 rounded-full shadow-inner border border-white/5">
-        {binStr.split('').map((bit, i) => (
-          <LED key={i} on={bit === '1'} color="green" label={`OUT REG - Bit ${7-i}: ${bit}`} setHoverInfo={setHoverInfo} />
-        ))}
-      </div>
-      <div className="absolute -bottom-1 left-2 right-2 flex justify-between px-1">
-        {Array.from({ length: pinCount }).map((_, i) => <div key={`b-${i}`} className="w-1.5 h-1.5 bg-gradient-to-t from-slate-300 to-slate-500 rounded-sm shadow-sm" />)}
-      </div>
+      <input type="range" min="1" max="20" value={clockSpeed} onChange={(e) => setClockSpeed(parseInt(e.target.value))} className="w-20 accent-blue-500 h-1.5 bg-slate-300 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer mt-1" />
     </div>
-  );
-};
+
+    <div className="flex gap-1.5">
+      <button onClick={stepSim} disabled={sim.halted || isPlaying} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-500/30 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm font-bold text-xs" title="Step (Execute Next T-State)">
+        <SkipForward size={14} /> <span className="hidden lg:inline">STEP</span>
+      </button>
+      <button onClick={resetSim} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 rounded-lg transition-all shadow-sm font-bold text-xs" title="Reset Simulator">
+        <Clock size={14} /> <span className="hidden lg:inline">RESET</span>
+      </button>
+    </div>
+  </div>
+);
 
 export default function App() {
   const [program, setProgram] = useState(INITIAL_PROGRAM);
-  const [sim, setSim] = useState({ pc: 0, ir: 0, a: 0, b: 0, alu: 0, out: 0, ctrl: 0, bus: 0, cf: false, halted: false, active: false });
+  
+  // CPU State (Latches)
+  const [sim, setSim] = useState({ 
+    pc: 0, execPc: 0, mar: 0, ir: 0, a: 0, b: 0, out: 0, 
+    cf: false, halted: false, tState: 0, active: false 
+  });
+  
+  // UI & Clock State
   const [hoveredLed, setHoveredLed] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
   const [isDark, setIsDark] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [clockSpeed, setClockSpeed] = useState(4); // Hz
+  
+  // Advanced Display Options
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [displayMode, setDisplayMode] = useState('uint'); // 'uint', 'int', 'hex'
 
-  // Reset simulator when program changes
-  useEffect(() => {
-    if (sim.active) {
-      setSim({ pc: 0, ir: 0, a: 0, b: 0, alu: 0, out: 0, ctrl: 0, bus: 0, cf: false, halted: false, active: false });
-    }
-  }, [program]);
+  const programRef = useRef(program);
+  useEffect(() => { programRef.current = program; }, [program]);
+
+  const getByte = (idx, progArray = program) => {
+    if (idx >= progArray.length) return 0;
+    const r = progArray[idx];
+    if (r.mnemonic === 'DATA') return r.operand;
+    return (OPCODES[r.mnemonic].code << 4) | r.operand;
+  };
 
   const getMachineCode = (mnemonic, operand) => {
     if (mnemonic === 'DATA') {
@@ -168,106 +238,96 @@ export default function App() {
     return `${opBin} ${valBin}`;
   };
 
-  const getByte = (idx) => {
-    if (idx >= program.length) return 0;
-    const r = program[idx];
-    if (r.mnemonic === 'DATA') return r.operand;
-    return (OPCODES[r.mnemonic].code << 4) | r.operand;
-  };
+  // --- DERIVED COMBINATIONAL LOGIC (For Rendering & Simulator Core) ---
+  const ctrl = getControlWord(sim.ir, sim.tState, sim.cf);
+  const isSub = (ctrl & 0x0040) !== 0; // SU
+  const aluRaw = isSub ? (sim.a - sim.b) : (sim.a + sim.b);
+  const alu = (aluRaw + 256) & 0xFF;
+  const aluCf = isSub ? (sim.a >= sim.b) : (aluRaw > 0xFF);
+  const ramVal = getByte(sim.mar);
+  
+  // Determine what is currently driving the bus
+  let bus = 0;
+  if (ctrl & 0x0004) bus = sim.pc;
+  else if (ctrl & 0x1000) bus = ramVal;
+  else if (ctrl & 0x0800) bus = sim.ir & 0x0F;
+  else if (ctrl & 0x0100) bus = sim.a;
+  else if (ctrl & 0x0080) bus = alu;
 
+  // Clock Pulse (Step Sim)
   const stepSim = () => {
-    if (sim.halted) return;
-    const inst = program[sim.pc];
-    if (!inst) {
-      setSim(s => ({ ...s, halted: true, active: true }));
-      return;
-    }
+    setSim(prev => {
+      if (prev.halted) {
+        setIsPlaying(false);
+        return prev;
+      }
+      
+      const cw = getControlWord(prev.ir, prev.tState, prev.cf);
+      const isS = (cw & 0x0040) !== 0;
+      const aRaw = isS ? (prev.a - prev.b) : (prev.a + prev.b);
+      const currAlu = (aRaw + 256) & 0xFF;
+      const currCf = isS ? (prev.a >= prev.b) : (aRaw > 0xFF);
+      
+      let currBus = 0;
+      if (cw & 0x0004) currBus = prev.pc;
+      else if (cw & 0x1000) currBus = getByte(prev.mar, programRef.current);
+      else if (cw & 0x0800) currBus = prev.ir & 0x0F;
+      else if (cw & 0x0100) currBus = prev.a;
+      else if (cw & 0x0080) currBus = currAlu;
+      
+      let next = { ...prev, active: true };
+      
+      // Update Latches on clock edge
+      if (cw & 0x4000) next.mar = currBus & 0x0F; // MI
+      if (cw & 0x0400) next.ir = currBus; // II
+      if (cw & 0x0200) next.a = currBus; // AI
+      if (cw & 0x0020) next.b = currBus; // BI
+      if (cw & 0x0010) next.out = currBus; // OI
+      if (cw & 0x0002) next.pc = currBus & 0x0F; // J (Jump)
+      if (cw & 0x0008) next.pc = (next.pc + 1) & 0x0F; // CE (Count Enable)
+      if (cw & 0x0001) next.cf = currCf; // FI
+      if (cw & 0x8000) next.halted = true; // HLT
+      
+      // Track currently executing instruction for UI highlighting
+      if (cw & 0x4000 && prev.tState === 0) next.execPc = prev.pc;
 
-    // Emulate "Fetch" cycle: Load instruction byte into Instruction Register (IR)
-    const irVal = getByte(sim.pc); 
-    const ctrlVal = CTRL_WORDS[inst.mnemonic] || 0;
-    let nextSim = { ...sim, active: true, ir: irVal, ctrl: ctrlVal };
-    
-    let nextProgram = [...program];
-    const memVal = getByte(inst.operand);
-    let busVal = 0;
-
-    switch (inst.mnemonic) {
-      case 'NOP': 
-        nextSim.pc++; 
-        break;
-      case 'LDA': 
-        nextSim.a = memVal; 
-        busVal = memVal;
-        nextSim.pc++; 
-        break;
-      case 'ADD': 
-        nextSim.b = memVal; // Load value into B register
-        const sum = nextSim.a + nextSim.b;
-        nextSim.alu = sum & 0xFF; // ALU calculates sum
-        nextSim.a = nextSim.alu;  // ALU outputs to bus, A register reads from bus
-        busVal = nextSim.alu;
-        nextSim.cf = sum > 0xFF;
-        nextSim.pc++;
-        break;
-      case 'SUB': 
-        nextSim.b = memVal; // Load value into B register
-        const diff = nextSim.a - nextSim.b;
-        nextSim.alu = (diff + 256) & 0xFF; // ALU calculates difference
-        nextSim.a = nextSim.alu;
-        busVal = nextSim.alu;
-        nextSim.cf = nextSim.a >= nextSim.b;
-        nextSim.pc++;
-        break;
-      case 'STA':
-        if (inst.operand < 16) {
-          while (nextProgram.length <= inst.operand) {
-            nextProgram.push({ id: Math.random().toString(), mnemonic: 'DATA', operand: 0 });
-          }
-          nextProgram[inst.operand] = { ...nextProgram[inst.operand], mnemonic: 'DATA', operand: nextSim.a };
-          setProgram(nextProgram);
-        }
-        busVal = nextSim.a;
-        nextSim.pc++;
-        break;
-      case 'OUT':
-        nextSim.out = nextSim.a;
-        busVal = nextSim.a;
-        nextSim.pc++;
-        break;
-      case 'JMP':
-        nextSim.pc = inst.operand;
-        busVal = inst.operand;
-        break;
-      case 'LDI':
-        nextSim.a = inst.operand;
-        busVal = inst.operand;
-        nextSim.pc++;
-        break;
-      case 'JC':
-        if (nextSim.cf) nextSim.pc = inst.operand;
-        else nextSim.pc++;
-        busVal = inst.operand;
-        break;
-      case 'HLT':
-        nextSim.halted = true;
-        break;
-      case 'DATA':
-        nextSim.pc++;
-        busVal = memVal;
-        break;
-      default:
-        nextSim.pc++;
-    }
-
-    if (nextSim.pc >= 16) nextSim.halted = true;
-    nextSim.bus = busVal;
-    setSim(nextSim);
+      // RAM Write
+      if (cw & 0x2000) { // RI
+         let nextProg = [...programRef.current];
+         while (nextProg.length <= prev.mar) {
+            nextProg.push({ id: Math.random().toString(), mnemonic: 'DATA', operand: 0 });
+         }
+         nextProg[prev.mar] = { ...nextProg[prev.mar], mnemonic: 'DATA', operand: currBus };
+         setProgram(nextProg);
+      }
+      
+      // Advance T-State Ring Counter
+      let nextT = prev.tState + 1;
+      if (nextT > 5 || getControlWord(next.ir, nextT, next.cf) === 0) {
+          nextT = 0; // End of instruction, reset to Fetch
+      }
+      next.tState = nextT;
+      
+      return next;
+    });
   };
 
   const resetSim = () => {
-    setSim({ pc: 0, ir: 0, a: 0, b: 0, alu: 0, out: 0, ctrl: 0, bus: 0, cf: false, halted: false, active: false });
+    setIsPlaying(false);
+    setSim({ pc: 0, execPc: 0, mar: 0, ir: 0, a: 0, b: 0, out: 0, cf: false, halted: false, tState: 0, active: false });
   };
+
+  // Auto-Clock Logic
+  const stepRef = useRef(stepSim);
+  useEffect(() => { stepRef.current = stepSim; }, [stepSim]);
+  
+  useEffect(() => {
+    let timer;
+    if (isPlaying && !sim.halted) {
+      timer = setInterval(() => stepRef.current(), 1000 / clockSpeed);
+    }
+    return () => clearInterval(timer);
+  }, [isPlaying, clockSpeed, sim.halted]);
 
   const analyzeProgram = () => {
     const issues = [];
@@ -277,28 +337,17 @@ export default function App() {
       if (['JMP', 'JC'].includes(row.mnemonic)) {
         if (row.operand >= program.length) {
           issues.push({ type: 'error', msg: `Addr ${index}: ${row.mnemonic} jumps to uninitialized address ${row.operand}.` });
-        } else if (program[row.operand].mnemonic === 'DATA') {
-          issues.push({ type: 'warning', msg: `Addr ${index}: ${row.mnemonic} jumps to DATA at address ${row.operand}.` });
         }
       }
       if (['LDA', 'ADD', 'SUB'].includes(row.mnemonic)) {
         if (row.operand >= program.length) {
-          issues.push({ type: 'warning', msg: `Addr ${index}: ${row.mnemonic} reads from uninitialized address ${row.operand}.` });
+          issues.push({ type: 'warning', msg: `Addr ${index}: ${row.mnemonic} reads uninitialized address ${row.operand}.` });
         } else if (program[row.operand].mnemonic !== 'DATA') {
-          issues.push({ type: 'warning', msg: `Addr ${index}: ${row.mnemonic} reads from INSTRUCTION at address ${row.operand}.` });
-        }
-      }
-      if (row.mnemonic === 'STA') {
-        if (row.operand >= program.length) {
-          issues.push({ type: 'warning', msg: `Addr ${index}: STA writes to uninitialized address ${row.operand}.` });
-        } else if (program[row.operand].mnemonic !== 'DATA') {
-          issues.push({ type: 'warning', msg: `Addr ${index}: STA overwrites INSTRUCTION at address ${row.operand}.` });
+          issues.push({ type: 'warning', msg: `Addr ${index}: ${row.mnemonic} reads INSTRUCTION at address ${row.operand}.` });
         }
       }
     });
-    if (!hasHlt) {
-      issues.push({ type: 'error', msg: 'Program missing HLT (Halt). Execution will continue past end.' });
-    }
+    if (!hasHlt) issues.push({ type: 'error', msg: 'Program missing HLT (Halt). Execution will continue past end.' });
     return issues;
   };
 
@@ -308,16 +357,12 @@ export default function App() {
     if (program.length >= 16) return;
     setProgram([...program, { id: Date.now().toString(), mnemonic: 'NOP', operand: 0 }]);
   };
-
-  const deleteRow = (id) => {
-    setProgram(program.filter((row) => row.id !== id));
-  };
-
+  const deleteRow = (id) => setProgram(program.filter((row) => row.id !== id));
+  
   const updateRow = (id, field, value) => {
     setProgram(program.map((row) => {
       if (row.id === id) {
         let newVal = value;
-        // Clamp values
         if (field === 'operand') {
           const max = row.mnemonic === 'DATA' ? 255 : 15;
           newVal = Math.min(max, Math.max(0, parseInt(value) || 0));
@@ -331,10 +376,8 @@ export default function App() {
   const handleMnemonicChange = (id, newMnemonic) => {
     setProgram(program.map((row) => {
       if (row.id === id) {
-        // Reset operand to 0 if switching between DATA and an Instruction, to avoid overflow confusion
         const newOperand = newMnemonic === 'DATA' && row.mnemonic !== 'DATA' ? 0 
-                         : newMnemonic !== 'DATA' && row.mnemonic === 'DATA' ? 0 
-                         : row.operand;
+                         : newMnemonic !== 'DATA' && row.mnemonic === 'DATA' ? 0 : row.operand;
         return { ...row, mnemonic: newMnemonic, operand: newOperand };
       }
       return row;
@@ -370,21 +413,18 @@ export default function App() {
                   </h3>
                   <ul className="list-disc pl-10 space-y-1.5 marker:text-blue-500">
                     <li><strong>Memory Limit:</strong> The architecture has 16 bytes of memory (Addresses 0-15).</li>
-                    <li><strong>Instructions vs. Data:</strong> Select an instruction (e.g., <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">LDA</code>, <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">ADD</code>) from the dropdown. Use <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">DATA</code> to store raw values that your program needs to read or write.</li>
-                    <li><strong>Operands:</strong> Enter the target address or immediate value in the "Operand/Data" field. Instruction operands are limited to 4 bits (0-15). <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">DATA</code> rows accept up to 8 bits (0-255).</li>
+                    <li><strong>Instructions vs. Data:</strong> Select an instruction from the dropdown. Use <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">DATA</code> to store raw values that your program needs to read or write.</li>
                   </ul>
                 </section>
 
                 <section>
                   <h3 className="font-bold text-slate-900 dark:text-white text-base mb-2 flex items-center gap-2">
                     <span className="bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400 w-6 h-6 rounded-full flex items-center justify-center text-xs">2</span>
-                    Running the Simulator
+                    Micro-Stepping & The Clock
                   </h3>
                   <ul className="list-disc pl-10 space-y-1.5 marker:text-blue-500">
-                    <li>Click the <strong>Step</strong> button (<SkipForward size={14} className="inline"/>) in the Simulator panel to execute your program one instruction at a time. The active row will highlight in blue.</li>
-                    <li>Watch the <strong>Registers (A, B, OUT)</strong> update in real-time as calculations happen in the <strong>Arithmetic Logic Unit (ALU)</strong>.</li>
-                    <li>The <strong>Carry Flag (CF)</strong> will turn on (red) if an addition exceeds 255 or a subtraction results in a borrow.</li>
-                    <li>Click the <strong>Reset</strong> button (<Square size={14} className="inline"/>) to clear the registers and restart the simulation from Address 0.</li>
+                    <li><strong>T-States:</strong> Instructions don't execute instantly! They take multiple clock cycles (T-States). T0 and T1 fetch the instruction from RAM, and T2+ execute it.</li>
+                    <li>Click the <strong>Step</strong> button to advance exactly one clock cycle. Or, press <strong>Play</strong> to enable the Auto-Clock (adjustable via the speed slider).</li>
                   </ul>
                 </section>
 
@@ -395,8 +435,8 @@ export default function App() {
                   </h3>
                   <ul className="list-disc pl-10 space-y-1.5 marker:text-blue-500">
                     <li>Scroll to the bottom to see a live visual representation of the physical computer hardware.</li>
-                    <li><strong>Hover over any LED</strong> to see a detailed explanation of what that bit or control signal means in the black terminal panel below the breadboard.</li>
-                    <li>Pay close attention to the <strong>CPU Control Logic</strong> chip; it shows the active microcode signals (like <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">RO</code> for RAM Out) that dictate how data moves across the System Bus.</li>
+                    <li><strong>Hover over any LED</strong> to see a detailed explanation in the terminal panel below.</li>
+                    <li>Toggle <strong>Advanced Display Options</strong> to switch the Output Register between Unsigned, Signed, and Hexadecimal values.</li>
                   </ul>
                 </section>
               </div>
@@ -411,7 +451,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="max-w-7xl mx-auto space-y-6">
+        <div className="max-w-[90rem] mx-auto space-y-6">
           
           {/* Header */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between bg-white dark:bg-slate-900 p-5 rounded-2xl shadow-xl shadow-slate-200/40 dark:shadow-none border border-slate-200 dark:border-slate-800 gap-4 transition-colors duration-300 relative overflow-hidden">
@@ -423,11 +463,21 @@ export default function App() {
               </div>
               <div>
                 <h1 className="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-700 dark:from-white dark:to-slate-300">8-Bit Assembler</h1>
-                <p className="text-slate-500 dark:text-slate-400 text-xs font-medium">Interactive machine code generator (16 byte address space)</p>
+                <p className="text-slate-500 dark:text-slate-400 text-xs font-medium">Interactive machine code generator with micro-step hardware simulation</p>
               </div>
             </div>
             
             <div className="flex items-center gap-3 w-full sm:w-auto z-10">
+              
+              <button 
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-xl transition-all border shadow-sm font-medium text-sm ${showAdvanced ? 'bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/30' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
+                title="Toggle Advanced Features"
+              >
+                <Settings2 size={18} />
+                <span className="hidden sm:inline">Advanced Options</span>
+              </button>
+
               <button 
                 onClick={() => setIsDark(!isDark)}
                 className="p-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-xl transition-all shadow-sm border border-slate-200 dark:border-slate-700"
@@ -438,22 +488,22 @@ export default function App() {
               
               <button 
                 onClick={() => setShowHelp(true)} 
-                className="flex flex-1 sm:flex-none items-center gap-2 px-5 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl transition-all font-medium text-sm border border-slate-200 dark:border-slate-700 shadow-sm justify-center"
+                className="flex items-center gap-2 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl transition-all font-medium text-sm border border-slate-200 dark:border-slate-700 shadow-sm justify-center"
               >
                 <HelpCircle size={18} />
-                <span>How to Use</span>
+                <span className="hidden sm:inline">Help</span>
               </button>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
             
             {/* Main Editor */}
-            <div className="lg:col-span-2 bg-white dark:bg-slate-900 rounded-2xl shadow-xl shadow-slate-200/40 dark:shadow-none border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col transition-colors duration-300">
-              <div className="overflow-x-auto flex-grow">
+            <div className="xl:col-span-2 bg-white dark:bg-slate-900 rounded-2xl shadow-xl shadow-slate-200/40 dark:shadow-none border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col transition-colors duration-300 h-[600px]">
+              <div className="overflow-y-auto flex-grow custom-scrollbar">
                 <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 text-xs uppercase tracking-wider">
+                  <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-800/90 backdrop-blur-md shadow-sm border-b border-slate-200 dark:border-slate-800">
+                    <tr className="text-[11px] uppercase tracking-wider">
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Addr (Dec)</th>
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Instruction</th>
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Operand/Data</th>
@@ -463,51 +513,55 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50 text-sm">
-                    {program.map((row, index) => (
-                      <tr key={row.id} className={`hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors ${sim.active && sim.pc === index ? 'bg-blue-50/50 dark:bg-blue-900/20 border-l-4 border-blue-500' : 'border-l-4 border-transparent'}`}>
-                        <td className="p-4 font-medium text-slate-500 dark:text-slate-400">
-                          <div className="flex items-center gap-2">
-                            {sim.active && sim.pc === index && <SkipForward size={14} className="text-blue-500 dark:text-blue-400 animate-pulse"/>}
-                            {index}
-                          </div>
-                        </td>
-                        <td className="p-4">
-                          <select
-                            value={row.mnemonic}
-                            onChange={(e) => handleMnemonicChange(row.id, e.target.value)}
-                            className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-white transition-colors"
-                          >
-                            {Object.keys(OPCODES).map((op) => (
-                              <option key={op} value={op}>{op}</option>
-                            ))}
-                            <option value="DATA">DATA</option>
-                          </select>
-                        </td>
-                        <td className="p-4">
-                          <input
-                            type="number"
-                            value={row.operand}
-                            min="0"
-                            max={row.mnemonic === 'DATA' ? "255" : "15"}
-                            onChange={(e) => updateRow(row.id, 'operand', e.target.value)}
-                            className="w-24 p-2 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-white transition-colors"
-                          />
-                        </td>
-                        <td className="p-4 text-indigo-600 dark:text-indigo-400 font-medium text-right">{toBin(index, 4)}</td>
-                        <td className="p-4 font-bold tracking-widest text-emerald-600 dark:text-emerald-400">
-                          {getMachineCode(row.mnemonic, row.operand)}
-                        </td>
-                        <td className="p-4 text-center">
-                          <button
-                            onClick={() => deleteRow(row.id)}
-                            className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors"
-                            title="Delete row"
-                          >
-                            <Trash2 size={18} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {program.map((row, index) => {
+                      // Highlight the currently EXECUTING instruction row
+                      const isExecuting = sim.active && sim.execPc === index;
+                      return (
+                        <tr key={row.id} className={`hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors ${isExecuting ? 'bg-indigo-50/50 dark:bg-indigo-900/20 border-l-4 border-indigo-500' : 'border-l-4 border-transparent'}`}>
+                          <td className="p-3 sm:p-4 font-medium text-slate-500 dark:text-slate-400">
+                            <div className="flex items-center gap-2">
+                              {isExecuting && <Play size={12} className="text-indigo-500 dark:text-indigo-400 animate-pulse fill-indigo-500"/>}
+                              {index}
+                            </div>
+                          </td>
+                          <td className="p-3 sm:p-4">
+                            <select
+                              value={row.mnemonic}
+                              onChange={(e) => handleMnemonicChange(row.id, e.target.value)}
+                              className="w-full p-2 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-white transition-colors"
+                            >
+                              {Object.keys(OPCODES).map((op) => (
+                                <option key={op} value={op}>{op}</option>
+                              ))}
+                              <option value="DATA">DATA</option>
+                            </select>
+                          </td>
+                          <td className="p-3 sm:p-4">
+                            <input
+                              type="number"
+                              value={row.operand}
+                              min="0"
+                              max={row.mnemonic === 'DATA' ? "255" : "15"}
+                              onChange={(e) => updateRow(row.id, 'operand', e.target.value)}
+                              className="w-24 p-2 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-white transition-colors"
+                            />
+                          </td>
+                          <td className="p-3 sm:p-4 text-indigo-600 dark:text-indigo-400 font-medium text-right">{toBin(index, 4)}</td>
+                          <td className="p-3 sm:p-4 font-bold tracking-widest text-emerald-600 dark:text-emerald-400">
+                            {getMachineCode(row.mnemonic, row.operand)}
+                          </td>
+                          <td className="p-3 sm:p-4 text-center">
+                            <button
+                              onClick={() => deleteRow(row.id)}
+                              className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors"
+                              title="Delete row"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {program.length === 0 && (
                       <tr>
                         <td colSpan="6" className="p-8 text-center text-slate-400 italic">
@@ -519,8 +573,7 @@ export default function App() {
                 </table>
               </div>
               
-              {/* Footer Actions */}
-              <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center">
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-200 dark:border-slate-800 flex justify-between items-center shrink-0">
                 <span className="text-sm font-medium text-slate-500 dark:text-slate-400">
                   Memory Used: <strong className={program.length === 16 ? "text-red-500" : "text-slate-700 dark:text-slate-200"}>{program.length}/16</strong> bytes
                 </span>
@@ -536,64 +589,75 @@ export default function App() {
             </div>
 
             {/* Right Sidebar */}
-            <div className="space-y-6">
+            <div className="space-y-6 overflow-y-auto max-h-[600px] custom-scrollbar pr-2">
               
               {/* Simulator Panel */}
               <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl shadow-xl shadow-slate-200/40 dark:shadow-none border border-slate-200 dark:border-slate-800 transition-colors duration-300">
-                <div className="flex justify-between items-center mb-4">
-                  <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                    <Play size={20} className="text-emerald-500 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" /> Simulator
-                  </h2>
-                  <div className="flex gap-1.5">
-                    <button onClick={stepSim} disabled={sim.halted} className="p-2 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-500/30 rounded-lg disabled:opacity-50 transition-colors shadow-sm" title="Step (Execute Next)">
-                      <SkipForward size={18} />
-                    </button>
-                    <button onClick={resetSim} className="p-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors shadow-sm" title="Reset Simulator">
-                      <Square size={18} />
-                    </button>
-                  </div>
+                
+                {/* Simulator Controls */}
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-5 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <SimulatorControls isPlaying={isPlaying} setIsPlaying={setIsPlaying} sim={sim} stepSim={stepSim} resetSim={resetSim} clockSpeed={clockSpeed} setClockSpeed={setClockSpeed} />
                 </div>
+
                 <div className="grid grid-cols-2 gap-3">
-                  {/* Program Counter & Instruction Register */}
+                  {/* T-State Ring Counter */}
+                  <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm col-span-2">
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-2 uppercase tracking-wider flex justify-between">
+                      <span>Instruction Cycle (Micro-steps)</span>
+                      <span className="text-blue-500 font-black">T{sim.tState}</span>
+                    </div>
+                    <div className="flex gap-1.5 w-full h-2">
+                      {[0,1,2,3,4,5].map(t => (
+                        <div key={t} className={`flex-1 rounded-full transition-all duration-200 ${sim.tState === t ? 'bg-blue-500 shadow-[0_0_8px_#3b82f6]' : 'bg-slate-200 dark:bg-slate-700'}`} />
+                      ))}
+                    </div>
+                  </div>
+
                   <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">Program Counter</div>
-                    <div className="font-mono text-lg font-semibold">{sim.pc} <span className="text-xs text-slate-400 font-normal">({toBin(sim.pc, 4)})</span></div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider flex justify-between"><span>Prog Counter</span> <span className="text-slate-400">({toBin(sim.pc, 4)})</span></div>
+                    <div className="font-mono text-lg font-semibold">{sim.pc}</div>
                   </div>
                   <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">Instruction Reg</div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">Inst Reg</div>
                     <div className="font-mono text-lg text-purple-600 dark:text-purple-400 font-bold">
-                      {toBin(sim.ir, 8).slice(0, 4)} {toBin(sim.ir, 8).slice(4, 8)}
+                      {toBin(sim.ir, 8).slice(0, 4)} <span className="text-slate-400">{toBin(sim.ir, 8).slice(4, 8)}</span>
                     </div>
                   </div>
                   
-                  {/* Registers A & B */}
                   <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">A Register</div>
-                    <div className="font-mono text-lg font-semibold">{sim.a} <span className="text-xs text-slate-400 font-normal">({toBin(sim.a, 8)})</span></div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider flex justify-between"><span>Mem Addr Reg</span> <span className="text-slate-400">({toBin(sim.mar, 4)})</span></div>
+                    <div className="font-mono text-lg font-semibold text-sky-600 dark:text-sky-400">{sim.mar}</div>
                   </div>
                   <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">B Register</div>
-                    <div className="font-mono text-lg font-semibold">{sim.b} <span className="text-xs text-slate-400 font-normal">({toBin(sim.b, 8)})</span></div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider flex justify-between"><span>RAM (Value)</span> <span className="text-slate-400">({toBin(ramVal, 8)})</span></div>
+                    <div className="font-mono text-lg font-semibold text-sky-600 dark:text-sky-400">{ramVal}</div>
                   </div>
 
-                  {/* Arithmetic Logic Unit */}
+                  <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider flex justify-between"><span>A Register</span> <span className="text-slate-400">({toBin(sim.a, 8)})</span></div>
+                    <div className="font-mono text-lg font-semibold">{sim.a}</div>
+                  </div>
+                  <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider flex justify-between"><span>B Register</span> <span className="text-slate-400">({toBin(sim.b, 8)})</span></div>
+                    <div className="font-mono text-lg font-semibold">{sim.b}</div>
+                  </div>
+
                   <div className="col-span-2 p-3 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl border border-blue-200 dark:border-blue-800/50 flex justify-between items-center shadow-sm">
                     <div>
-                      <div className="text-[10px] text-blue-600 dark:text-blue-400 font-bold mb-1 uppercase tracking-wider">Arithmetic Logic Unit (ALU)</div>
-                      <div className="text-xs text-blue-500/80 dark:text-blue-400/80">Latest calculation output</div>
+                      <div className="text-[10px] text-blue-600 dark:text-blue-400 font-bold mb-1 uppercase tracking-wider">Arith Logic Unit</div>
+                      <div className="text-xs text-blue-500/80 dark:text-blue-400/80 font-medium">Operation: {isSub ? 'SUBTRACT' : 'ADD'}</div>
                     </div>
                     <div className="font-mono text-xl text-blue-700 dark:text-blue-300 font-bold text-right">
-                      {sim.alu} <span className="text-sm font-normal text-blue-500 dark:text-blue-400">({toBin(sim.alu, 8)})</span>
+                      {alu} <span className="text-sm font-normal text-blue-500 dark:text-blue-400">({toBin(alu, 8)})</span>
                     </div>
                   </div>
 
-                  {/* Output & Flags */}
                   <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">Output Register</div>
-                    <div className="font-mono text-lg text-emerald-600 dark:text-emerald-400 font-bold">{sim.out} <span className="text-xs text-emerald-500/70 font-normal">({toBin(sim.out, 8)})</span></div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider flex justify-between"><span>OUT Register</span> <span className="text-slate-400">({toBin(sim.out, 8)})</span></div>
+                    <div className="font-mono text-lg text-emerald-600 dark:text-emerald-400 font-bold">{sim.out}</div>
                   </div>
                   <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">CPU Control Logic</div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">Flags</div>
                     <div className="font-mono mt-1.5 flex gap-2">
                       <span className={`px-2 py-0.5 rounded text-xs shadow-sm ${sim.cf ? 'bg-red-500 text-white font-bold' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`} title="Carry Flag">CF</span>
                       <span className={`px-2 py-0.5 rounded text-xs shadow-sm ${sim.halted ? 'bg-red-500 text-white font-bold' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`} title="Halt Flag">HLT</span>
@@ -605,7 +669,7 @@ export default function App() {
               {/* Program Checks / Linter */}
               <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl shadow-xl shadow-slate-200/40 dark:shadow-none border border-slate-200 dark:border-slate-800 transition-colors duration-300">
                 <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2 mb-4">
-                  <CheckCircle2 size={20} className="text-blue-500" /> Checks
+                  <CheckCircle2 size={20} className="text-blue-500" /> Pre-Flight Checks
                 </h2>
                 {issues.length === 0 ? (
                   <div className="text-sm font-medium text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 p-3 rounded-xl border border-emerald-200 dark:border-emerald-500/20 shadow-sm">
@@ -622,55 +686,28 @@ export default function App() {
                   </ul>
                 )}
               </div>
-
-              {/* Reference Panel */}
-              <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl shadow-xl shadow-slate-200/40 dark:shadow-none border border-slate-200 dark:border-slate-800 hidden lg:block transition-colors duration-300">
-                <div className="flex items-center space-x-2 mb-5">
-                  <Info className="text-blue-500" size={20} />
-                  <h2 className="text-lg font-bold text-slate-900 dark:text-white">Instruction Set</h2>
-                </div>
-                
-                <div className="space-y-2.5">
-                  <div className="grid grid-cols-[2.5rem_2.5rem_1fr] gap-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider pb-2 border-b border-slate-100 dark:border-slate-800">
-                    <div>Code</div>
-                    <div>Mne</div>
-                    <div>Description</div>
-                  </div>
-                  
-                  {Object.entries(OPCODES).map(([mnemonic, data]) => (
-                    <div key={mnemonic} className="grid grid-cols-[2.5rem_2.5rem_1fr] gap-2 text-xs items-center hover:bg-slate-50 dark:hover:bg-slate-800/50 p-1 rounded-md transition-colors">
-                      <div className="text-indigo-600 dark:text-indigo-400 font-bold">{toBin(data.code, 4)}</div>
-                      <div className="font-bold text-slate-700 dark:text-slate-200">{mnemonic}</div>
-                      <div className="text-slate-500 dark:text-slate-400 truncate" title={data.desc}>{data.desc}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
             </div>
           </div>
 
           {/* Breadboard Visualizer */}
-          <div className="mt-6 p-3 sm:p-4 md:p-8 rounded-2xl border-4 border-slate-300 dark:border-slate-700 shadow-[inset_0_4px_12px_rgba(0,0,0,0.1)] dark:shadow-[inset_0_4px_20px_rgba(0,0,0,0.5)] relative overflow-hidden transition-colors duration-500" style={boardStyle}>
+          <div className="mt-6 rounded-2xl border-4 border-slate-300 dark:border-slate-700 shadow-[inset_0_4px_12px_rgba(0,0,0,0.1)] dark:shadow-[inset_0_4px_20px_rgba(0,0,0,0.5)] relative overflow-hidden transition-colors duration-500 flex flex-col" style={boardStyle}>
             
-            <div className="absolute top-0 left-0 bg-white/70 dark:bg-slate-900/70 backdrop-blur-md px-3 sm:px-4 py-1.5 sm:py-2 rounded-br-2xl font-bold text-slate-800 dark:text-white shadow-md border-b border-r border-white/20 flex items-center gap-2 text-xs sm:text-sm z-20">
-              <Cpu size={16} className="text-blue-600 dark:text-blue-400" /> Live Breadboard State
+            {/* Interactive Breadboard Header */}
+            <div className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md px-4 py-3 border-b border-slate-300/50 dark:border-slate-700/50 flex flex-col xl:flex-row justify-between items-center gap-4 z-20 shadow-sm w-full sticky top-0">
+              <div className="flex items-center gap-2 font-black text-slate-800 dark:text-white tracking-wide">
+                <Cpu size={20} className="text-blue-600 dark:text-blue-400" /> LIVE BREADBOARD
+              </div>
+              <SimulatorControls isPlaying={isPlaying} setIsPlaying={setIsPlaying} sim={sim} stepSim={stepSim} resetSim={resetSim} clockSpeed={clockSpeed} setClockSpeed={setClockSpeed} />
             </div>
             
-            <div className="relative w-full flex flex-col items-center mt-10 md:mt-8">
+            <div className="relative w-full flex flex-col items-center p-4 sm:p-8 min-w-[300px]">
               
               {/* Top Row of Chips */}
-              <div className="flex flex-wrap justify-center gap-4 md:gap-10 w-full z-10">
+              <div className="flex flex-wrap justify-center gap-4 md:gap-8 w-full z-10">
+                <BreadboardChip title="CLOCK / T-STATE" value={sim.tState} bits={3} color="blue" setHoverInfo={setHoveredLed} />
                 <BreadboardChip title="PC (ADDR)" value={sim.pc} bits={4} color="green" setHoverInfo={setHoveredLed} />
-                <BreadboardChip title="INST (IR)" value={sim.ir} bits={8} color="blue" setHoverInfo={setHoveredLed} />
-                <BreadboardChip 
-                  title="FLAGS (-,CF,-,HLT)" 
-                  manualBits={`0${sim.cf ? '1' : '0'}0${sim.halted ? '1' : '0'}`} 
-                  bits={4} 
-                  color="yellow" 
-                  bitLabels={['Unused', 'Carry Flag (CF)', 'Unused', 'Halt Flag (HLT)']}
-                  setHoverInfo={setHoveredLed}
-                />
+                <BreadboardChip title="MEM ADDR (MAR)" value={sim.mar} bits={4} color="yellow" setHoverInfo={setHoveredLed} />
+                <BreadboardChip title="RAM (DATA)" value={ramVal} bits={8} color="blue" setHoverInfo={setHoveredLed} />
               </div>
 
               {/* The Central Bus */}
@@ -681,7 +718,7 @@ export default function App() {
                  
                  {/* Bus LEDs */}
                  <div className="flex flex-wrap justify-center gap-2 sm:gap-5 relative z-10 bg-slate-200 dark:bg-slate-800 px-4 sm:px-8 py-2 sm:py-2.5 rounded-full border border-slate-300 dark:border-slate-700 shadow-lg">
-                   {toBin(sim.bus, 8).split('').map((bit, i) => (
+                   {toBin(bus, 8).split('').map((bit, i) => (
                       <LED key={i} on={bit === '1'} color="blue" label={`System Bus - Bit ${7 - i}: ${bit}`} setHoverInfo={setHoveredLed} />
                    ))}
                  </div>
@@ -689,55 +726,86 @@ export default function App() {
               </div>
 
               {/* Middle Row of Chips */}
-              <div className="flex flex-wrap justify-center gap-4 md:gap-10 w-full z-10 items-start">
-                <BreadboardChip title="A REG" value={sim.a} bits={8} color="red" setHoverInfo={setHoveredLed} />
-                <BreadboardChip title="B REG" value={sim.b} bits={8} color="red" setHoverInfo={setHoveredLed} />
-                <BreadboardChip title="ALU" value={sim.alu} bits={8} color="yellow" setHoverInfo={setHoveredLed} />
-                
-                {/* Upgraded Output Register Module */}
-                <OutRegChip value={sim.out} setHoverInfo={setHoveredLed} />
+              <div className="flex flex-wrap justify-center gap-4 md:gap-8 w-full z-10 items-start">
+                <BreadboardChip title="INST REG (IR)" value={sim.ir} bits={8} color="blue" setHoverInfo={setHoveredLed} />
+                <BreadboardChip title="A REGISTER" value={sim.a} bits={8} color="red" setHoverInfo={setHoveredLed} />
+                <BreadboardChip title="B REGISTER" value={sim.b} bits={8} color="red" setHoverInfo={setHoveredLed} />
+                <BreadboardChip title="ARITH LOGIC (ALU)" value={alu} bits={8} color="yellow" setHoverInfo={setHoveredLed} />
               </div>
 
               {/* Spacer */}
               <div className="h-4 md:h-8 w-full"></div>
 
               {/* Bottom Row of Chips */}
-              <div className="flex flex-wrap justify-center gap-4 md:gap-10 w-full z-10 mt-2 md:mt-4 mb-2 md:mb-4">
+              <div className="flex flex-wrap justify-center gap-4 md:gap-8 w-full z-10 mt-2 md:mt-4 mb-2 md:mb-4">
+                
+                {/* Advanced Output Register */}
+                <BreadboardChip title="OUT REG / DISPLAY" value={sim.out} bits={8} color="green" setHoverInfo={setHoveredLed}>
+                  <div className="flex flex-col items-center gap-2">
+                    <SevenSegmentDisplay value={sim.out} mode={displayMode} advanced={showAdvanced} />
+                    
+                    {/* Advanced Display Toggle Controls */}
+                    {showAdvanced && (
+                       <div className="flex bg-black/40 rounded border border-white/10 text-[8px] overflow-hidden mt-1">
+                         <button onClick={() => setDisplayMode('uint')} className={`px-2 py-1 transition-colors ${displayMode==='uint' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}>UINT</button>
+                         <button onClick={() => setDisplayMode('int')} className={`px-2 py-1 transition-colors border-l border-white/10 ${displayMode==='int' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}>INT</button>
+                         <button onClick={() => setDisplayMode('hex')} className={`px-2 py-1 transition-colors border-l border-white/10 ${displayMode==='hex' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}>HEX</button>
+                       </div>
+                    )}
+                    {!showAdvanced && (
+                      <div className="flex gap-1 sm:gap-1.5 bg-black/20 p-1 sm:p-1.5 rounded-full shadow-inner border border-white/5 mt-1">
+                        {toBin(sim.out, 8).split('').map((bit, i) => (
+                          <LED key={i} on={bit === '1'} color="green" label={`OUT REG - Bit ${7-i}: ${bit}`} setHoverInfo={setHoveredLed} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </BreadboardChip>
+                
                 <BreadboardChip 
-                  title="CPU CONTROL LOGIC (EEPROM MICROCODE)" 
-                  value={sim.ctrl} 
+                  title="CPU CONTROL LOGIC (EEPROM)" 
+                  value={ctrl} 
                   bits={16} 
                   color="blue" 
                   setHoverInfo={setHoveredLed}
                   bitLabels={[
                     'HLT: Halt clock (Stops execution)',
-                    'MI: Memory Address Register In (Latches address from bus)',
-                    'RI: RAM Data In (Writes bus value to RAM)',
-                    'RO: RAM Data Out (Outputs RAM value to bus)',
-                    'IO: Instruction Register Out (Outputs operand to bus)',
-                    'II: Instruction Register In (Latches instruction from bus)',
-                    'AI: A Register In (Latches value from bus)',
-                    'AO: A Register Out (Outputs value to bus)',
-                    'EO: ALU Result Out (Outputs ALU calculation to bus)',
-                    'SU: ALU Subtract Operation (Sets ALU to subtract instead of add)',
-                    'BI: B Register In (Latches value from bus)',
-                    'OI: Output Register In (Latches value from bus to display)',
-                    'CE: Program Counter Enable (Increments counter)',
-                    'CO: Program Counter Out (Outputs address to bus)',
-                    'J: Jump (Program Counter In - Latches address from bus)',
-                    'FI: Flags Register In (Latches ALU condition flags)'
+                    'MI: Memory Address Register In',
+                    'RI: RAM Data In (Writes bus to RAM)',
+                    'RO: RAM Data Out (Outputs to bus)',
+                    'IO: Instruction Register Out (Lower 4 bits)',
+                    'II: Instruction Register In',
+                    'AI: A Register In',
+                    'AO: A Register Out',
+                    'EO: ALU Result Out',
+                    'SU: ALU Subtract Operation',
+                    'BI: B Register In',
+                    'OI: Output Register In',
+                    'CE: Program Counter Enable (Increment)',
+                    'CO: Program Counter Out',
+                    'J: Jump (Program Counter In)',
+                    'FI: Flags Register In'
                   ]}
+                />
+                
+                <BreadboardChip 
+                  title="FLAGS (-,CF,-,HLT)" 
+                  manualBits={`0${sim.cf ? '1' : '0'}0${sim.halted ? '1' : '0'}`} 
+                  bits={4} 
+                  color="yellow" 
+                  bitLabels={['Unused', 'Carry Flag (CF)', 'Unused', 'Halt Flag (HLT)']}
+                  setHoverInfo={setHoveredLed}
                 />
               </div>
 
               {/* Hover Info Panel */}
-              <div className="mt-6 md:mt-8 w-full max-w-4xl min-h-[4rem] bg-black/90 dark:bg-black rounded-xl border border-slate-700/50 shadow-2xl flex flex-col sm:flex-row items-center px-4 sm:px-6 py-3 backdrop-blur-md transition-colors duration-300 text-center sm:text-left gap-2 sm:gap-0">
+              <div className="mt-6 md:mt-8 w-full max-w-5xl min-h-[4rem] bg-black/90 dark:bg-black rounded-xl border border-slate-700/50 shadow-2xl flex flex-col sm:flex-row items-center px-4 sm:px-6 py-3 backdrop-blur-md transition-colors duration-300 text-center sm:text-left gap-2 sm:gap-0">
                 <Terminal size={22} className={hoveredLed ? "text-emerald-400 sm:mr-4 shrink-0 hidden sm:block" : "text-slate-600 sm:mr-4 shrink-0 hidden sm:block"} />
                 <div className="font-mono text-xs sm:text-sm tracking-wide leading-relaxed w-full">
                   {hoveredLed ? (
                     <span className="text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.3)]">{hoveredLed}</span>
                   ) : (
-                    <span className="text-slate-500 animate-pulse">Tap or hover over any LED to view its specific function...</span>
+                    <span className="text-slate-500 animate-pulse">Tap or hover over any LED on a chip to view its specific function...</span>
                   )}
                 </div>
               </div>
