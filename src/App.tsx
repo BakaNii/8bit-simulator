@@ -390,6 +390,30 @@ export default function App() {
 
   return (
     <div className={`${isDark ? 'dark' : ''} min-h-screen transition-colors duration-300`}>
+      {/* Custom Scrollbar Styles */}
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background-color: #cbd5e1; /* slate-300 */
+          border-radius: 10px;
+        }
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+          background-color: #334155; /* slate-700 */
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background-color: #94a3b8; /* slate-400 */
+        }
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background-color: #475569; /* slate-600 */
+        }
+      `}</style>
+      
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 p-2 md:p-6 font-mono text-slate-800 dark:text-slate-200 transition-colors duration-300 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-transparent via-slate-100/50 to-transparent dark:via-slate-900/20">
         
         {/* Help Instructions Modal */}
