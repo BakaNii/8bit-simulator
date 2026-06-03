@@ -63,3 +63,7 @@ Got an idea for a new feature? Found a bug? Feel free to open an issue or submit
 ## 📜 License
 
 This project is open-source and available under the [MIT License](LICENSE).
+
+---
+
+*Disclaimer: This project was "vibe coded" and built with the assistance of AI. It was not made solely by me, but rather brought to life through a collaborative process!*
