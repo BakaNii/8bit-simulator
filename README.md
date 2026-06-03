@@ -12,7 +12,7 @@ Welcome to the **8-Bit Simulator**, an interactive web-based machine code genera
 
 ## 🚀 Live Demo
 
-You can try out the live version of the simulator right away (deployed via Vercel). *(Note: Add your Vercel URL here!)*
+You can try out the live version of the simulator right away (deployed via [Vercel](https://8bit-simulator.vercel.app/)). 
 
 ## 🛠️ How to Run Locally
 
