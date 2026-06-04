@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Trash2, Cpu, Info, Play, Square, SkipForward, AlertTriangle, CheckCircle2, Terminal, HelpCircle, X, Moon, Sun, Settings2, Clock } from 'lucide-react';
+import { Plus, Trash2, Cpu, Info, Play, Square, SkipForward, AlertTriangle, CheckCircle2, Terminal, HelpCircle, X, Moon, Sun, Settings2, Clock, BookOpen } from 'lucide-react';
 
 const OPCODES = {
   NOP: { code: 0, desc: 'No operation' },
@@ -7,10 +7,11 @@ const OPCODES = {
   ADD: { code: 2, desc: 'Add' },
   SUB: { code: 3, desc: 'Subtract' },
   STA: { code: 4, desc: 'Store A -> Memory' },
-  OUT: { code: 5, desc: 'Output A -> OUT' },
+  LDI: { code: 5, desc: 'Load immediate -> A' },
   JMP: { code: 6, desc: 'Jump to address' },
-  LDI: { code: 7, desc: 'Load immediate -> A' },
-  JC:  { code: 8, desc: 'Jump if carry flag' },
+  JC:  { code: 7, desc: 'Jump if carry flag' },
+  JZ:  { code: 8, desc: 'Jump if zero flag' },
+  OUT: { code: 14, desc: 'Output A -> OUT' },
   HLT: { code: 15, desc: 'Halt execution' },
 };
 
@@ -23,9 +24,9 @@ const INITIAL_PROGRAM = [
   { id: '6', mnemonic: 'DATA', operand: 28 },
 ];
 
-// Returns the 16-bit Control Word for a given instruction, T-State, and Carry Flag
+// Returns the 16-bit Control Word for a given instruction, T-State, and Flags
 // Format: HLT | MI | RI | RO | IO | II | AI | AO || EO | SU | BI | OI | CE | CO | J | FI
-const getControlWord = (ir, tState, cf) => {
+const getControlWord = (ir, tState, cf, zf) => {
   if (tState === 0) return 0x4004; // T0: MI | CO (Fetch)
   if (tState === 1) return 0x1408; // T1: RO | II | CE (Fetch)
   
@@ -52,20 +53,24 @@ const getControlWord = (ir, tState, cf) => {
        if (t===0) return 0x4800; // IO | MI
        if (t===1) return 0x2100; // AO | RI
        return 0;
-    case 5: // OUT
-       if (t===0) return 0x0110; // AO | OI
+    case 5: // LDI
+       if (t===0) return 0x0A00; // IO | AI
        return 0;
     case 6: // JMP
        if (t===0) return 0x0802; // IO | J
        return 0;
-    case 7: // LDI
-       if (t===0) return 0x0A00; // IO | AI
-       return 0;
-    case 8: // JC
+    case 7: // JC
        if (t===0) return cf ? 0x0802 : 0; // IO | J (Only if Carry Flag is true)
        return 0;
+    case 8: // JZ
+       if (t===0) return zf ? 0x0802 : 0; // IO | J (Only if Zero Flag is true)
+       return 0;
+    case 14: // OUT
+       if (t===0) return 0x0110; // AO | OI
+       return 0;
     case 15: // HLT
-       return 0x8000;
+       if (t===0) return 0x8000;
+       return 0;
     default: return 0;
   }
 };
@@ -204,12 +209,13 @@ export default function App() {
   // CPU State (Latches)
   const [sim, setSim] = useState({ 
     pc: 0, execPc: 0, mar: 0, ir: 0, a: 0, b: 0, out: 0, 
-    cf: false, halted: false, tState: 0, active: false 
+    cf: false, zf: false, halted: false, tState: 0, active: false 
   });
   
   // UI & Clock State
   const [hoveredLed, setHoveredLed] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [showInstructionHelp, setShowInstructionHelp] = useState(false);
   const [isDark, setIsDark] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [clockSpeed, setClockSpeed] = useState(4); // Hz
@@ -239,12 +245,25 @@ export default function App() {
   };
 
   // --- DERIVED COMBINATIONAL LOGIC (For Rendering & Simulator Core) ---
-  const ctrl = getControlWord(sim.ir, sim.tState, sim.cf);
+  const ctrl = getControlWord(sim.ir, sim.tState, sim.cf, sim.zf);
   const isSub = (ctrl & 0x0040) !== 0; // SU
   const aluRaw = isSub ? (sim.a - sim.b) : (sim.a + sim.b);
   const alu = (aluRaw + 256) & 0xFF;
   const aluCf = isSub ? (sim.a >= sim.b) : (aluRaw > 0xFF);
   const ramVal = getByte(sim.mar);
+  
+  // Decode IR for tooltips on the breadboard
+  const activeOpcodeName = Object.keys(OPCODES).find(k => OPCODES[k].code === (sim.ir >> 4)) || 'UNKNOWN';
+  const irBitLabels = [
+    `Opcode Bit 3 (Decoded Instruction: ${activeOpcodeName})`,
+    `Opcode Bit 2 (Decoded Instruction: ${activeOpcodeName})`,
+    `Opcode Bit 1 (Decoded Instruction: ${activeOpcodeName})`,
+    `Opcode Bit 0 (Decoded Instruction: ${activeOpcodeName})`,
+    `Operand Bit 3`,
+    `Operand Bit 2`,
+    `Operand Bit 1`,
+    `Operand Bit 0`,
+  ];
   
   // Determine what is currently driving the bus
   let bus = 0;
@@ -262,11 +281,12 @@ export default function App() {
         return prev;
       }
       
-      const cw = getControlWord(prev.ir, prev.tState, prev.cf);
+      const cw = getControlWord(prev.ir, prev.tState, prev.cf, prev.zf);
       const isS = (cw & 0x0040) !== 0;
       const aRaw = isS ? (prev.a - prev.b) : (prev.a + prev.b);
       const currAlu = (aRaw + 256) & 0xFF;
       const currCf = isS ? (prev.a >= prev.b) : (aRaw > 0xFF);
+      const currZf = currAlu === 0;
       
       let currBus = 0;
       if (cw & 0x0004) currBus = prev.pc;
@@ -285,7 +305,10 @@ export default function App() {
       if (cw & 0x0010) next.out = currBus; // OI
       if (cw & 0x0002) next.pc = currBus & 0x0F; // J (Jump)
       if (cw & 0x0008) next.pc = (next.pc + 1) & 0x0F; // CE (Count Enable)
-      if (cw & 0x0001) next.cf = currCf; // FI
+      if (cw & 0x0001) { // FI
+        next.cf = currCf;
+        next.zf = currZf;
+      }
       if (cw & 0x8000) next.halted = true; // HLT
       
       // Track currently executing instruction for UI highlighting
@@ -314,7 +337,7 @@ export default function App() {
 
   const resetSim = () => {
     setIsPlaying(false);
-    setSim({ pc: 0, execPc: 0, mar: 0, ir: 0, a: 0, b: 0, out: 0, cf: false, halted: false, tState: 0, active: false });
+    setSim({ pc: 0, execPc: 0, mar: 0, ir: 0, a: 0, b: 0, out: 0, cf: false, zf: false, halted: false, tState: 0, active: false });
   };
 
   // Auto-Clock Logic
@@ -334,7 +357,7 @@ export default function App() {
     let hasHlt = false;
     program.forEach((row, index) => {
       if (row.mnemonic === 'HLT') hasHlt = true;
-      if (['JMP', 'JC'].includes(row.mnemonic)) {
+      if (['JMP', 'JC', 'JZ'].includes(row.mnemonic)) {
         if (row.operand >= program.length) {
           issues.push({ type: 'error', msg: `Addr ${index}: ${row.mnemonic} jumps to uninitialized address ${row.operand}.` });
         }
@@ -475,6 +498,55 @@ export default function App() {
           </div>
         )}
 
+        {/* Instruction Set Help Modal */}
+        {showInstructionHelp && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-md transition-opacity">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden transform scale-100">
+              <div className="flex justify-between items-center p-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+                <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <BookOpen className="text-blue-500" /> Instruction Set Reference
+                </h2>
+                <button onClick={() => setShowInstructionHelp(false)} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors">
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="p-0 overflow-y-auto custom-scrollbar">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-100 dark:bg-slate-800/80 sticky top-0 z-10 border-b border-slate-200 dark:border-slate-700">
+                    <tr>
+                      <th className="p-4 font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider text-[11px]">Mnemonic</th>
+                      <th className="p-4 font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider text-[11px]">Opcode (Bin)</th>
+                      <th className="p-4 font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider text-[11px]">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
+                    {Object.entries(OPCODES).map(([mnemonic, data]) => (
+                      <tr key={mnemonic} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                        <td className="p-4 font-bold text-slate-900 dark:text-white">{mnemonic}</td>
+                        <td className="p-4 font-mono text-indigo-600 dark:text-indigo-400 font-medium">{toBin(data.code, 4)}</td>
+                        <td className="p-4">{data.desc}</td>
+                      </tr>
+                    ))}
+                    <tr className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors bg-blue-50/30 dark:bg-blue-900/10">
+                      <td className="p-4 font-bold text-slate-900 dark:text-white">DATA</td>
+                      <td className="p-4 font-mono text-slate-500 dark:text-slate-400">----</td>
+                      <td className="p-4 italic">Stores an 8-bit raw value (0-255). Not an executable instruction.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/80 border-t border-slate-200 dark:border-slate-700 text-right flex justify-between items-center">
+                <span className="text-xs text-slate-400 dark:text-slate-500 italic">Operands are limited to 4 bits (0-15)</span>
+                <button onClick={() => setShowInstructionHelp(false)} className="px-6 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-white rounded-lg font-medium transition-colors shadow-sm">
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="max-w-[90rem] mx-auto space-y-6">
           
           {/* Header */}
@@ -500,6 +572,14 @@ export default function App() {
               >
                 <Settings2 size={18} />
                 <span className="hidden sm:inline">Advanced Options</span>
+              </button>
+
+              <button 
+                onClick={() => setShowInstructionHelp(true)} 
+                className="flex items-center gap-2 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl transition-all font-medium text-sm border border-slate-200 dark:border-slate-700 shadow-sm justify-center"
+              >
+                <BookOpen size={18} />
+                <span className="hidden xl:inline">Instructions</span>
               </button>
 
               <button 
@@ -529,7 +609,14 @@ export default function App() {
                   <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-800/90 backdrop-blur-md shadow-sm border-b border-slate-200 dark:border-slate-800">
                     <tr className="text-[11px] uppercase tracking-wider">
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Addr (Dec)</th>
-                      <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Instruction</th>
+                      <th className="p-4 font-bold text-slate-500 dark:text-slate-400">
+                        <div className="flex items-center gap-2">
+                          Instruction
+                          <button onClick={() => setShowInstructionHelp(true)} className="text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 transition-colors" title="View Instruction Help">
+                            <Info size={14} />
+                          </button>
+                        </div>
+                      </th>
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Operand/Data</th>
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400 text-right">Addr (Bin)</th>
                       <th className="p-4 font-bold text-slate-500 dark:text-slate-400">Machine Code</th>
@@ -571,7 +658,10 @@ export default function App() {
                             />
                           </td>
                           <td className="p-3 sm:p-4 text-indigo-600 dark:text-indigo-400 font-medium text-right">{toBin(index, 4)}</td>
-                          <td className="p-3 sm:p-4 font-bold tracking-widest text-emerald-600 dark:text-emerald-400">
+                          <td 
+                            className="p-3 sm:p-4 font-bold tracking-widest text-emerald-600 dark:text-emerald-400 cursor-help"
+                            title={row.mnemonic === 'DATA' ? `Raw 8-bit Data: ${row.operand}` : `Opcode: ${toBin(OPCODES[row.mnemonic].code, 4)} (${row.mnemonic})\nOperand: ${toBin(row.operand, 4)} (Val: ${row.operand})`}
+                          >
                             {getMachineCode(row.mnemonic, row.operand)}
                           </td>
                           <td className="p-3 sm:p-4 text-center">
@@ -684,6 +774,7 @@ export default function App() {
                     <div className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mb-1 uppercase tracking-wider">Flags</div>
                     <div className="font-mono mt-1.5 flex gap-2">
                       <span className={`px-2 py-0.5 rounded text-xs shadow-sm ${sim.cf ? 'bg-red-500 text-white font-bold' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`} title="Carry Flag">CF</span>
+                      <span className={`px-2 py-0.5 rounded text-xs shadow-sm ${sim.zf ? 'bg-red-500 text-white font-bold' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`} title="Zero Flag">ZF</span>
                       <span className={`px-2 py-0.5 rounded text-xs shadow-sm ${sim.halted ? 'bg-red-500 text-white font-bold' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'}`} title="Halt Flag">HLT</span>
                     </div>
                   </div>
@@ -751,7 +842,7 @@ export default function App() {
 
               {/* Middle Row of Chips */}
               <div className="flex flex-wrap justify-center gap-4 md:gap-8 w-full z-10 items-start">
-                <BreadboardChip title="INST REG (IR)" value={sim.ir} bits={8} color="blue" setHoverInfo={setHoveredLed} />
+                <BreadboardChip title="INST REG (IR)" value={sim.ir} bits={8} color="blue" setHoverInfo={setHoveredLed} bitLabels={irBitLabels} />
                 <BreadboardChip title="A REGISTER" value={sim.a} bits={8} color="red" setHoverInfo={setHoveredLed} />
                 <BreadboardChip title="B REGISTER" value={sim.b} bits={8} color="red" setHoverInfo={setHoveredLed} />
                 <BreadboardChip title="ARITH LOGIC (ALU)" value={alu} bits={8} color="yellow" setHoverInfo={setHoveredLed} />
@@ -813,11 +904,11 @@ export default function App() {
                 />
                 
                 <BreadboardChip 
-                  title="FLAGS (-,CF,-,HLT)" 
-                  manualBits={`0${sim.cf ? '1' : '0'}0${sim.halted ? '1' : '0'}`} 
+                  title="FLAGS (-,CF,ZF,HLT)" 
+                  manualBits={`0${sim.cf ? '1' : '0'}${sim.zf ? '1' : '0'}${sim.halted ? '1' : '0'}`} 
                   bits={4} 
                   color="yellow" 
-                  bitLabels={['Unused', 'Carry Flag (CF)', 'Unused', 'Halt Flag (HLT)']}
+                  bitLabels={['Unused', 'Carry Flag (CF)', 'Zero Flag (ZF)', 'Halt Flag (HLT)']}
                   setHoverInfo={setHoveredLed}
                 />
               </div>
