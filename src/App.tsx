@@ -819,7 +819,14 @@ export default function App() {
               
               {/* Top Row of Chips */}
               <div className="flex flex-wrap justify-center gap-4 md:gap-8 w-full z-10">
-                <BreadboardChip title="CLOCK / T-STATE" value={sim.tState} bits={3} color="blue" setHoverInfo={setHoveredLed} />
+                <BreadboardChip 
+                  title="CLOCK / T-STATE" 
+                  manualBits={Array.from({length: 6}).map((_, i) => i === sim.tState ? '1' : '0').join('')}
+                  bits={6} 
+                  color="blue" 
+                  bitLabels={['T0', 'T1', 'T2', 'T3', 'T4', 'T5']}
+                  setHoverInfo={setHoveredLed} 
+                />
                 <BreadboardChip title="PC (ADDR)" value={sim.pc} bits={4} color="green" setHoverInfo={setHoveredLed} />
                 <BreadboardChip title="MEM ADDR (MAR)" value={sim.mar} bits={4} color="yellow" setHoverInfo={setHoveredLed} />
                 <BreadboardChip title="RAM (DATA)" value={ramVal} bits={8} color="blue" setHoverInfo={setHoveredLed} />
